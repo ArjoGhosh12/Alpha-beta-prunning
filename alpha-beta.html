@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpha-Beta Pruning Visualizer</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#1b2430; --muted:#6b7686; --line:#c9d0da;
+    --max:#2b6cb0; --min:#c05621; --leaf:#e8edf3; --active:#f2c14e; --done:#d6ecd9;
+    --prune:#c53030; --cur:#6b46c1;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{padding:14px 20px 6px}
+  h1{margin:0;font-size:20px}
+  header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 20px}
+  button{font:inherit;font-size:14px;padding:8px 14px;border:1px solid var(--line);background:var(--panel);border-radius:6px;cursor:pointer;color:var(--ink)}
+  button:hover{border-color:var(--max)}
+  button.primary{background:var(--max);color:#fff;border-color:var(--max)}
+  button:focus-visible{outline:2px solid var(--cur);outline-offset:2px}
+  label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .stats{display:flex;flex-wrap:wrap;gap:16px;padding:0 20px 8px;font-size:13px}
+  .stats b{font-variant-numeric:tabular-nums}
+  #msg{margin:0 20px 10px;padding:10px 14px;background:var(--panel);border-left:4px solid var(--cur);border-radius:4px;font-size:15px;min-height:46px}
+  #wrap{margin:0 20px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:auto;height:560px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;padding:10px 20px 20px;font-size:12px;color:var(--muted)}
+  .legend span{display:flex;align-items:center;gap:6px}
+  .sw{width:14px;height:14px;border:1px solid #888;display:inline-block}
+  svg text{font-family:system-ui,sans-serif}
+</style>
+</head>
+<body>
+<header>
+  <h1>Alpha-Beta Pruning: step by step</h1>
+  <p>Tree depth 4, 3 branches per node, 81 leaves. Root is MAX. Click Next step to walk through the algorithm.</p>
+</header>
+
+<div class="bar">
+  <button id="prev">&larr; Back</button>
+  <button id="next" class="primary">Next step &rarr;</button>
+  <button id="play">Auto-play</button>
+  <button id="reset">Reset</button>
+  <button id="rand">New random leaves</button>
+  <button id="end">Jump to end</button>
+  <label>Speed <input type="range" id="speed" min="50" max="1200" value="450"></label>
+</div>
+
+<div class="stats">
+  <span>Step <b id="sStep">0</b> / <b id="sTotal">0</b></span>
+  <span>Leaves evaluated <b id="sEval">0</b> / 81</span>
+  <span>Leaves pruned <b id="sPrune">0</b></span>
+  <span>Root value <b id="sRoot">?</b></span>
+</div>
+
+<div id="msg">Press Next step to begin. The algorithm starts at the root with &alpha; = -&infin; and &beta; = +&infin;.</div>
+
+<div id="wrap"><svg id="svg"></svg></div>
+
+<div class="legend">
+  <span><svg width="16" height="14"><polygon points="8,1 15,13 1,13" fill="#fff" stroke="#2b6cb0" stroke-width="2"/></svg>MAX node</span>
+  <span><svg width="16" height="14"><polygon points="1,1 15,1 8,13" fill="#fff" stroke="#c05621" stroke-width="2"/></svg>MIN node</span>
+  <span><i class="sw" style="background:#e8edf3"></i>Leaf</span>
+  <span><i class="sw" style="background:#f2c14e"></i>On current path</span>
+  <span><i class="sw" style="background:#d6ecd9"></i>Finished</span>
+  <span><i class="sw" style="background:#fff;border:2px solid #6b46c1"></i>Node being processed</span>
+  <span><i class="sw" style="background:#f5d5d5;border-color:#c53030"></i>Pruned (never visited)</span>
+</div>
+
+<script>
+const D = 4, B = 3;             // depth and branching factor
+const GAP = 30;                 // horizontal gap between leaves
+const LEVEL_H = 100, TOP = 50;
+const INF = Infinity;
+
+let nodes = [], root, events = [], step = 0, timer = null;
+
+/* ---------- tree ---------- */
+function build(depth, parent) {
+  const n = { id: nodes.length, depth, parent, ch: [], isMax: depth % 2 === 0, val: null };
+  nodes.push(n);
+  if (depth < D) for (let i = 0; i < B; i++) n.ch.push(build(depth + 1, n));
+  return n;
+}
+function layout() {
+  let leafIdx = 0;
+  (function go(n) {
+    if (!n.ch.length) { n.x = 30 + leafIdx++ * GAP; }
+    else { n.ch.forEach(go); n.x = (n.ch[0].x + n.ch[n.ch.length - 1].x) / 2; }
+    n.y = TOP + n.depth * LEVEL_H;
+  })(root);
+}
+function randomLeaves() {
+  nodes.forEach(n => { if (!n.ch.length) n.val = Math.floor(Math.random() * 20) + 1; });
+}
+
+/* ---------- run alpha-beta and record every event ---------- */
+const f = x => x === INF ? "+∞" : x === -INF ? "-∞" : x;
+const name = n => n.depth === 0 ? "root" : "node " + n.id;
+function subtreeIds(n) { let r = [n.id]; n.ch.forEach(c => r = r.concat(subtreeIds(c))); return r; }
+function leafCount(n) { return n.ch.length ? n.ch.reduce((s, c) => s + leafCount(c), 0) : 1; }
+
+function record() {
+  events = [];
+  function ab(n, a, b) {
+    events.push({ t: "enter", n: n.id, a, b,
+      msg: `Visit ${name(n)} (${n.isMax ? "MAX" : "MIN"}) with &alpha;=${f(a)}, &beta;=${f(b)}.` });
+    if (!n.ch.length) {
+      events.push({ t: "leaf", n: n.id, v: n.val, msg: `Leaf reached. Static value = <b>${n.val}</b>.` });
+      events.push({ t: "exit", n: n.id, v: n.val, msg: `Return ${n.val} to parent.` });
+      return n.val;
+    }
+    let v = n.isMax ? -INF : INF;
+    for (let i = 0; i < n.ch.length; i++) {
+      const c = n.ch[i];
+      const cv = ab(c, a, b);
+      const old = v;
+      if (n.isMax) { v = Math.max(v, cv); a = Math.max(a, v); }
+      else         { v = Math.min(v, cv); b = Math.min(b, v); }
+      events.push({ t: "update", n: n.id, v, a, b,
+        msg: `Back at ${name(n)} (${n.isMax ? "MAX" : "MIN"}): child returned ${cv}. ` +
+             (n.isMax ? `v = max(${f(old)}, ${cv}) = <b>${v}</b>, so &alpha; = <b>${f(a)}</b>.`
+                      : `v = min(${f(old)}, ${cv}) = <b>${v}</b>, so &beta; = <b>${f(b)}</b>.`) });
+      if (a >= b) {
+        const rest = n.ch.slice(i + 1);
+        if (rest.length) {
+          const ids = rest.flatMap(subtreeIds);
+          const lv = rest.reduce((s, c) => s + leafCount(c), 0);
+          events.push({ t: "prune", n: n.id, ids, msg:
+            `<b style="color:#c53030">PRUNE!</b> &alpha;=${f(a)} &ge; &beta;=${f(b)}. ` +
+            `${n.isMax ? "MIN above will never allow this MAX to be chosen" : "MAX above already has a better option"}, ` +
+            `so the remaining ${rest.length} child(ren) of ${name(n)} (${lv} leaves) are skipped.` });
+        }
+        break;
+      }
+    }
+    events.push({ t: "exit", n: n.id, v, msg: `${name(n)} finished with value <b>${v}</b>.` });
+    return v;
+  }
+  ab(root, -INF, INF);
+}
+
+/* ---------- state at a given step ---------- */
+function stateAt(k) {
+  const st = nodes.map(() => ({ s: "new", a: null, b: null, v: null }));
+  for (let i = 0; i < k; i++) {
+    const e = events[i], s = st[e.n];
+    if (e.t === "enter") { s.s = "act"; s.a = e.a; s.b = e.b; }
+    else if (e.t === "leaf") { s.v = e.v; }
+    else if (e.t === "update") { s.v = e.v; s.a = e.a; s.b = e.b; }
+    else if (e.t === "prune") { e.ids.forEach(id => st[id].s = "pruned"); }
+    else if (e.t === "exit") { s.s = "done"; s.v = e.v; }
+  }
+  return st;
+}
+
+/* ---------- drawing ---------- */
+const svg = document.getElementById("svg");
+const wrap = document.getElementById("wrap");
+
+function draw() {
+  const st = stateAt(step);
+  const cur = step > 0 ? events[step - 1].n : -1;
+  const W = nodes.filter(n => !n.ch.length).slice(-1)[0].x + 40;
+  const H = TOP + D * LEVEL_H + 50;
+  svg.setAttribute("width", W); svg.setAttribute("height", H);
+  let out = "";
+
+  // edges
+  nodes.forEach(n => n.ch.forEach(c => {
+    const pr = st[c.id].s === "pruned";
+    out += `<line x1="${n.x}" y1="${n.y}" x2="${c.x}" y2="${c.y}" stroke="${pr ? "#c53030" : "#9aa5b4"}" stroke-width="${pr ? 1 : 1.6}" ${pr ? 'stroke-dasharray="4 3"' : ""}/>`;
+    if (pr && st[n.id].s !== "pruned") {
+      const mx = (n.x + c.x) / 2, my = (n.y + c.y) / 2;
+      out += `<text x="${mx}" y="${my}" text-anchor="middle" fill="#c53030" font-size="16" font-weight="700">×</text>`;
+    }
+  }));
+
+  // nodes
+  nodes.forEach(n => {
+    const s = st[n.id];
+    let fill = "#fff", stroke = n.ch.length ? (n.isMax ? "#2b6cb0" : "#c05621") : "#8896a8", sw = 2;
+    if (!n.ch.length) fill = "#e8edf3";
+    if (s.s === "act") fill = "#f2c14e";
+    if (s.s === "done") fill = "#d6ecd9";
+    if (s.s === "pruned") { fill = "#f5d5d5"; stroke = "#c53030"; }
+    if (n.id === cur) { stroke = "#6b46c1"; sw = 4; }
+    const x = n.x, y = n.y;
+    if (!n.ch.length) {
+      out += `<rect x="${x - 12}" y="${y - 12}" width="24" height="24" rx="3" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`;
+    } else if (n.isMax) {
+      out += `<polygon points="${x},${y - 17} ${x + 17},${y + 13} ${x - 17},${y + 13}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`;
+    } else {
+      out += `<polygon points="${x - 17},${y - 13} ${x + 17},${y - 13} ${x},${y + 17}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`;
+    }
+    // value text
+    let label = "";
+    if (!n.ch.length) label = (s.s === "pruned") ? "" : (s.v !== null ? s.v : (s.s === "new" ? "" : ""));
+    else if (s.v !== null && s.v !== INF && s.v !== -INF) label = s.v;
+    const ty = n.ch.length ? (n.isMax ? y + 8 : y - 2) : y + 5;
+    if (label !== "") out += `<text x="${x}" y="${ty}" text-anchor="middle" font-size="13" font-weight="700" fill="#1b2430">${label}</text>`;
+    // pruned leaves still show their (unvisited) value faintly
+    if (!n.ch.length && s.s === "pruned") out += `<text x="${x}" y="${y + 5}" text-anchor="middle" font-size="11" fill="#c53030" opacity=".7">${n.val}</text>`;
+    // alpha / beta label
+    if (n.ch.length && s.a !== null) {
+      out += `<text x="${x}" y="${y - 24}" text-anchor="middle" font-size="10.5" fill="#1b2430">` +
+             `<tspan fill="#2b6cb0">α=${f(s.a)}</tspan> <tspan fill="#c05621">β=${f(s.b)}</tspan></text>`;
+    }
+    if (n.depth === 0) out += `<text x="${x - 40}" y="${y + 4}" text-anchor="end" font-size="12" fill="#6b7686">ROOT</text>`;
+  });
+
+  svg.innerHTML = out;
+
+  // stats
+  const leaves = nodes.filter(n => !n.ch.length);
+  document.getElementById("sStep").textContent = step;
+  document.getElementById("sTotal").textContent = events.length;
+  document.getElementById("sEval").textContent = leaves.filter(l => st[l.id].v !== null).length;
+  document.getElementById("sPrune").textContent = leaves.filter(l => st[l.id].s === "pruned").length;
+  document.getElementById("sRoot").textContent = (st[0].s === "done") ? st[0].v : "?";
+  document.getElementById("msg").innerHTML = step === 0
+    ? "Press Next step to begin. The algorithm starts at the root with &alpha; = -&infin; and &beta; = +&infin;."
+    : `<small style="color:#6b7686">Step ${step}:</small> ` + events[step - 1].msg +
+      (step === events.length ? ` <br><b>Done.</b> Optimal root value = ${st[0].v}.` : "");
+
+  // scroll to current node
+  if (cur >= 0) {
+    const cx = nodes[cur].x;
+    wrap.scrollTo({ left: Math.max(0, cx - wrap.clientWidth / 2), behavior: "smooth" });
+  }
+}
+
+/* ---------- controls ---------- */
+function go(k) { step = Math.max(0, Math.min(events.length, k)); draw(); if (step === events.length) stop(); }
+function stop() { if (timer) { clearInterval(timer); timer = null; document.getElementById("play").textContent = "Auto-play"; } }
+function play() {
+  if (timer) { stop(); return; }
+  if (step >= events.length) step = 0;
+  document.getElementById("play").textContent = "Pause";
+  const tick = () => { go(step + 1); };
+  timer = setInterval(tick, +document.getElementById("speed").value);
+}
+document.getElementById("speed").addEventListener("input", () => { if (timer) { stop(); play(); } });
+document.getElementById("next").onclick = () => { stop(); go(step + 1); };
+document.getElementById("prev").onclick = () => { stop(); go(step - 1); };
+document.getElementById("reset").onclick = () => { stop(); go(0); wrap.scrollTo({ left: 0 }); };
+document.getElementById("end").onclick = () => { stop(); go(events.length); };
+document.getElementById("play").onclick = play;
+document.getElementById("rand").onclick = () => { stop(); randomLeaves(); record(); step = 0; draw(); wrap.scrollTo({ left: 0 }); };
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { stop(); go(step + 1); }
+  if (e.key === "ArrowLeft") { stop(); go(step - 1); }
+});
+
+/* ---------- init ---------- */
+root = build(0, null);
+layout();
+randomLeaves();
+record();
+draw();
+</script>
+</body>
+</html>
